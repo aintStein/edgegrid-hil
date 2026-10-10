@@ -1,0 +1,21 @@
+# Arduino / PlatformIO
+.pio/
+.vscode/
+*.tmp
+*.o
+*.elf
+*.map
+*.bin
+*.exe
+*.dfu
+*.hex
+*.srec
+*.mem
+*.log
+.DS_Store
+
+# Wokwi
+.wokwi/
+
+# OS files
+Thumbs.db
