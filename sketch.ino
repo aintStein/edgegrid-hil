@@ -1,34 +1,41 @@
+#include <ArduinoJson.h>
+
 // --- PIN DEFINITIONS ---
 #define RELAY_PIN 5
 
 // --- THERMAL THRESHOLDS (MS 1525 Comfort Bounds) ---
-#define TEMP_UPPER_LIMIT 25.5  // Shed load (Turn OFF)
-#define TEMP_LOWER_LIMIT 24.0  // Restore load (Turn ON)
+#define TEMP_MAX_COMFORT 26.0   // Absolute max before comfort is violated
+#define TEMP_MIN_COMFORT 24.0   // Target to cool back down to
 
 // --- WATCHDOG & FAILSAFE VARIABLES ---
 unsigned long lastPacketTime = 0;       
-const unsigned long WATCHDOG_TIMEOUT = 3000; // 3 seconds timeout
+const unsigned long WATCHDOG_TIMEOUT = 3000; // 3 seconds
 bool failsafeActive = false;            
 
-// --- MOCK SENSOR & STATE VARIABLES ---
-// Starting at 25.0 so we can immediately see it cool down, then heat up
-float mock_temp = 25.0; 
-bool relay_state = true; // true = ON (Cooling), false = OFF (Shedding)
+// --- STATE VARIABLES ---
+// CHANGED TO 18.0 TO DEMONSTRATE HIGH THERMAL SLACK
+float current_temp = 18.0; 
+bool relay_state = true;   // true = ON (Cooling), false = OFF (Shedding)
+float thermal_slack = 0.0; // Minutes until room hits 26.0°C
 
 // --- TIMING VARIABLES ---
 unsigned long lastLogicCheck = 0;
 unsigned long lastMockSend = 0;
-const long logic_interval = 1000;  // Check logic every 1 second
-const long mock_interval = 1000;   // Simulate dashboard packet every 1 second
+const long logic_interval = 1000;  // 1 second
+const long mock_interval = 2000;   // Simulate dashboard packet every 2 seconds
+
+// --- MOCK JSON PAYLOADS (Simulating CS Lead's Python Script) ---
+// Scenario A: Plenty of solar, room is cool
+const char* json_payload_good = "{\"s\": 2.5, \"ta\": 31.0}\n";
+// Scenario B: Solar drops, but room has high thermal slack (safe to shed)
+const char* json_payload_shed = "{\"s\": 0.2, \"ta\": 31.0}\n";
 
 void setup() {
   Serial.begin(115200);
   pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // Default to ON (Comfort) on boot
   
-  // Failsafe: Ensure relay is OFF on boot (Assuming Active HIGH relay logic for simulation)
-  digitalWrite(RELAY_PIN, LOW); 
-  
-  lastPacketTime = millis(); // Initialize watchdog timer
+  lastPacketTime = millis(); 
   
   Serial.println("=========================================");
   Serial.println("[BOOT] EdgeGrid HIL Controller Initialized.");
@@ -41,63 +48,87 @@ void loop() {
   // ==========================================
   // 1. WATCHDOG CHECK
   // ==========================================
-  // If we haven't received a packet in 3 seconds, and we aren't already in failsafe mode:
   if (currentMillis - lastPacketTime >= WATCHDOG_TIMEOUT && !failsafeActive) {
     failsafeActive = true;
-    digitalWrite(RELAY_PIN, HIGH); // Force Relay ON to guarantee comfort
+    relay_state = true; // Force Relay ON
+    digitalWrite(RELAY_PIN, HIGH);
     Serial.println("[WATCHDOG] CRITICAL: Comms Lost! Defaulting to SAFE STATE (Relay ON).");
   }
 
   // ==========================================
-  // 2. MOCK DATA GENERATOR (Simulating Python Dashboard)
+  // 2. SIMULATE INCOMING JSON FROM DASHBOARD
   // ==========================================
-  // *** CHANGE THIS TO 'false' TO SIMULATE A CABLE UNPLUG / CRASH ***
-  bool simulateConnection = false; 
+  // CHANGE THIS VARIABLE TO TEST DIFFERENT SCENARIOS:
+  // Use `json_payload_good` or `json_payload_shed` or set to NULL to test watchdog
+  const char* incoming_data = json_payload_shed; 
 
-  if (simulateConnection && currentMillis - lastMockSend >= mock_interval) {
+  if (incoming_data != NULL && currentMillis - lastMockSend >= mock_interval) {
     lastMockSend = currentMillis;
-    lastPacketTime = currentMillis; // <--- RESETS THE WATCHDOG TIMER
+    lastPacketTime = currentMillis; // Reset watchdog
     
     if (failsafeActive) {
       failsafeActive = false;
       Serial.println("[WATCHDOG] Comms Restored. Returning to Edge Control.");
     }
-    
-    Serial.println("[MOCK] Packet received from Dashboard. Watchdog reset.");
+
+    // --- JSON PARSING LOGIC ---
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, incoming_data);
+
+    if (error) {
+      Serial.print("[JSON ERROR] Failed to parse: ");
+      Serial.println(error.c_str());
+    } else {
+      float solar_kw = doc["s"];
+      float ambient_temp = doc["ta"];
+      
+      // In a real system, ambient_temp would influence the thermal decay model.
+      // For now, we log it to prove parsing works.
+      Serial.printf("[RX] Parsed: Solar=%.1fkW, Ambient=%.1fC\n", solar_kw, ambient_temp);
+    }
   }
 
   // ==========================================
-  // 3 & 4. MOCK THERMAL SIMULATION & CONTROL LOGIC (FIXED TIMING)
+  // 3. THERMAL SLACK CALCULATION & CONTROL LOGIC
   // ==========================================
-  // We only want this to run ONCE every 1000ms (1 second)
   if (currentMillis - lastLogicCheck >= logic_interval) {
     lastLogicCheck = currentMillis;
 
-    // --- THE FIX: Temperature only changes once per second now ---
-    // If relay is ON (Cooling), temp drops. If OFF (Shedding), temp rises.
+    // A. Simulate physical temperature change
     if (relay_state) {
-      mock_temp -= 0.3; // Cool down by 0.3 degrees per second
+      current_temp -= 0.005; // Cool down slowly (0.3 deg per 60 secs)
     } else {
-      mock_temp += 0.2; // Heat up by 0.2 degrees per second
+      current_temp += 0.008; // Heat up slowly (0.5 deg per 60 secs)
     }
 
-    // Hysteresis Logic
-    if (mock_temp >= TEMP_UPPER_LIMIT && relay_state == true) {
-      relay_state = false; 
-      Serial.printf("[ACTUATION] RELAY OFF - Shedding Load (Temp: %.1f)\n", mock_temp);
+    // B. Calculate Thermal Slack (Minutes until hitting 26.0°C)
+    // If temp is already >= 26.0, slack is 0.
+    if (current_temp >= TEMP_MAX_COMFORT) {
+      thermal_slack = 0.0;
+    } else {
+      // Heating rate is approx 0.5 deg per min (defined by ME lead)
+      float heating_rate_per_min = 0.5; 
+      thermal_slack = (TEMP_MAX_COMFORT - current_temp) / heating_rate_per_min;
+    }
+
+    // C. EDGE DECISION MAKING
+    // Rule: Only shed load if we have MORE than 15 minutes of thermal slack
+    const float MIN_SAFE_SLACK = 15.0; 
+
+    if (thermal_slack > MIN_SAFE_SLACK && relay_state == true) {
+      relay_state = false; // Safe to shed
+      Serial.printf("[DECISION] Shedding Load. Thermal Slack: %.1f mins (Safe)\n", thermal_slack);
     } 
-    else if (mock_temp <= TEMP_LOWER_LIMIT && relay_state == false) {
-      relay_state = true; 
-      Serial.printf("[ACTUATION] RELAY ON - Restoring Load (Temp: %.1f)\n", mock_temp);
+    else if (thermal_slack <= MIN_SAFE_SLACK && relay_state == false) {
+      relay_state = true; // Must restore comfort
+      Serial.printf("[DECISION] Restoring Load. Thermal Slack: %.1f mins (Critical)\n", thermal_slack);
     }
 
-    // Apply state to hardware
-    digitalWrite(RELAY_PIN, relay_state);
+    // D. Apply state and report back (TX)
+    digitalWrite(RELAY_PIN, relay_state ? HIGH : LOW);
     
-    // Debug print
-    Serial.printf("[STATE] Temp: %.1f | Relay: %s | Failsafe: %s\n", 
-                  mock_temp, 
-                  relay_state ? "ON" : "OFF", 
-                  failsafeActive ? "ACTIVE" : "OK");
+    // Simulate the TX payload back to the dashboard
+    Serial.printf("[TX] {\"r\": %d, \"t\": %.1f, \"sl\": %.1f}\n", 
+                  relay_state ? 1 : 0, current_temp, thermal_slack);
   }
 }
