@@ -5,7 +5,17 @@
 
 // --- THERMAL THRESHOLDS (MS 1525 Comfort Bounds) ---
 #define TEMP_MAX_COMFORT 26.0   // Absolute max before comfort is violated
-#define TEMP_MIN_COMFORT 24.0   // Target to cool back down to
+
+// --- ME LEAD CONSTANTS (Real Physics) ---
+// Heating rate when AC is OFF (°C per minute)
+#define HEATING_RATE_PER_MIN 0.00822 
+// Cooling rate when AC is ON (°C per minute)
+#define COOLING_RATE_PER_MIN 0.05178 
+
+// --- DEMO MODE (For Pitch Video) ---
+// Set to true to multiply thermal rates by 60x for the 3-minute video
+#define DEMO_MODE true 
+const float TIME_LAPSE_MULTIPLIER = 60.0; 
 
 // --- WATCHDOG & FAILSAFE VARIABLES ---
 unsigned long lastPacketTime = 0;       
@@ -13,10 +23,13 @@ const unsigned long WATCHDOG_TIMEOUT = 3000; // 3 seconds
 bool failsafeActive = false;            
 
 // --- STATE VARIABLES ---
-// CHANGED TO 18.0 TO DEMONSTRATE HIGH THERMAL SLACK
-float current_temp = 18.0; 
+float current_temp = 24.5; // Starting room temp
 bool relay_state = true;   // true = ON (Cooling), false = OFF (Shedding)
 float thermal_slack = 0.0; // Minutes until room hits 26.0°C
+
+// --- USER PREFERENCE LOGIC ---
+int user_preference = 2; // 1: Max Savings, 2: Balanced, 3: Max Comfort
+float min_safe_slack = 15.0; // Default for Balanced
 
 // --- TIMING VARIABLES ---
 unsigned long lastLogicCheck = 0;
@@ -24,11 +37,9 @@ unsigned long lastMockSend = 0;
 const long logic_interval = 1000;  // 1 second
 const long mock_interval = 2000;   // Simulate dashboard packet every 2 seconds
 
-// --- MOCK JSON PAYLOADS (Simulating CS Lead's Python Script) ---
-// Scenario A: Plenty of solar, room is cool
-const char* json_payload_good = "{\"s\": 2.5, \"ta\": 31.0}\n";
-// Scenario B: Solar drops, but room has high thermal slack (safe to shed)
-const char* json_payload_shed = "{\"s\": 0.2, \"ta\": 31.0}\n";
+// --- MOCK JSON PAYLOADS (Simulating CS Lead's Streamlit App) ---
+// Change "pref" to 1, 2, or 3 to test different user modes
+const char* json_payload_balanced = "{\"s\": 0.2, \"ta\": 31.0, \"pref\": 2}\n";
 
 void setup() {
   Serial.begin(115200);
@@ -58,9 +69,7 @@ void loop() {
   // ==========================================
   // 2. SIMULATE INCOMING JSON FROM DASHBOARD
   // ==========================================
-  // CHANGE THIS VARIABLE TO TEST DIFFERENT SCENARIOS:
-  // Use `json_payload_good` or `json_payload_shed` or set to NULL to test watchdog
-  const char* incoming_data = json_payload_shed; 
+  const char* incoming_data = json_payload_balanced; 
 
   if (incoming_data != NULL && currentMillis - lastMockSend >= mock_interval) {
     lastMockSend = currentMillis;
@@ -82,52 +91,61 @@ void loop() {
       float solar_kw = doc["s"];
       float ambient_temp = doc["ta"];
       
-      // In a real system, ambient_temp would influence the thermal decay model.
-      // For now, we log it to prove parsing works.
-      Serial.printf("[RX] Parsed: Solar=%.1fkW, Ambient=%.1fC\n", solar_kw, ambient_temp);
+      // Update User Preference if present
+      if (doc.containsKey("pref")) {
+        user_preference = doc["pref"];
+        if (user_preference == 1) min_safe_slack = 30.0;      // Max Savings
+        else if (user_preference == 2) min_safe_slack = 15.0; // Balanced
+        else if (user_preference == 3) min_safe_slack = 0.0;  // Max Comfort (Never shed)
+      }
+      
+      Serial.printf("[RX] Solar=%.1fkW, Ambient=%.1fC, Pref=%d (Slack Threshold: %.1f)\n", 
+                    solar_kw, ambient_temp, user_preference, min_safe_slack);
     }
   }
 
   // ==========================================
-  // 3. THERMAL SLACK CALCULATION & CONTROL LOGIC
+  // 3. THERMAL PHYSICS & EDGE DECISION
   // ==========================================
   if (currentMillis - lastLogicCheck >= logic_interval) {
     lastLogicCheck = currentMillis;
 
-    // A. Simulate physical temperature change
-    if (relay_state) {
-      current_temp -= 0.005; // Cool down slowly (0.3 deg per 60 secs)
-    } else {
-      current_temp += 0.008; // Heat up slowly (0.5 deg per 60 secs)
+    // A. Apply physical rates (scaled by multiplier if in DEMO_MODE)
+    float current_heating = HEATING_RATE_PER_MIN;
+    float current_cooling = COOLING_RATE_PER_MIN;
+    
+    if (DEMO_MODE) {
+      current_heating *= TIME_LAPSE_MULTIPLIER;
+      current_cooling *= TIME_LAPSE_MULTIPLIER;
     }
 
-    // B. Calculate Thermal Slack (Minutes until hitting 26.0°C)
-    // If temp is already >= 26.0, slack is 0.
+    if (relay_state) {
+      current_temp -= (current_cooling / 60.0); // Convert min rate to sec rate
+    } else {
+      current_temp += (current_heating / 60.0);
+    }
+
+    // B. Calculate Thermal Slack
     if (current_temp >= TEMP_MAX_COMFORT) {
       thermal_slack = 0.0;
     } else {
-      // Heating rate is approx 0.5 deg per min (defined by ME lead)
-      float heating_rate_per_min = 0.5; 
-      thermal_slack = (TEMP_MAX_COMFORT - current_temp) / heating_rate_per_min;
+      // Use real heating rate for slack calculation (scaled for demo)
+      thermal_slack = (TEMP_MAX_COMFORT - current_temp) / current_heating;
     }
 
     // C. EDGE DECISION MAKING
-    // Rule: Only shed load if we have MORE than 15 minutes of thermal slack
-    const float MIN_SAFE_SLACK = 15.0; 
-
-    if (thermal_slack > MIN_SAFE_SLACK && relay_state == true) {
+    if (thermal_slack > min_safe_slack && relay_state == true) {
       relay_state = false; // Safe to shed
-      Serial.printf("[DECISION] Shedding Load. Thermal Slack: %.1f mins (Safe)\n", thermal_slack);
+      Serial.printf("[DECISION] Shedding Load. Slack: %.1f > Threshold: %.1f\n", thermal_slack, min_safe_slack);
     } 
-    else if (thermal_slack <= MIN_SAFE_SLACK && relay_state == false) {
+    else if (thermal_slack <= min_safe_slack && relay_state == false) {
       relay_state = true; // Must restore comfort
-      Serial.printf("[DECISION] Restoring Load. Thermal Slack: %.1f mins (Critical)\n", thermal_slack);
+      Serial.printf("[DECISION] Restoring Load. Slack: %.1f <= Threshold: %.1f\n", thermal_slack, min_safe_slack);
     }
 
-    // D. Apply state and report back (TX)
+    // D. Apply state and broadcast TX
     digitalWrite(RELAY_PIN, relay_state ? HIGH : LOW);
     
-    // Simulate the TX payload back to the dashboard
     Serial.printf("[TX] {\"r\": %d, \"t\": %.1f, \"sl\": %.1f}\n", 
                   relay_state ? 1 : 0, current_temp, thermal_slack);
   }
