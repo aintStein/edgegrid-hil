@@ -1,51 +1,49 @@
+#define ARDUINO_USB_CDC_ON_BOOT 1
+#define ARDUINO_USB_MODE 1
+
 #include <ArduinoJson.h>
 
 // --- PIN DEFINITIONS ---
-#define RELAY_PIN 5
+#define RELAY_PIN 4  // N16R8 safe pin with 10k pulldown to GND
 
-// --- THERMAL THRESHOLDS (MS 1525 Comfort Bounds) ---
-#define TEMP_MAX_COMFORT 26.0   // Absolute max before comfort is violated
+// --- THERMAL MODEL CONSTANTS (ME Verified) ---
+const float COOLING_RATE = 0.05178;   // °C/min when AC ON
+const float HEATING_RATE = 0.00822;   // °C/min when AC OFF
+const float TEMP_UPPER_LIMIT = 26.0;  // MS 1525 upper bound
+const float TEMP_LOWER_LIMIT = 23.0;  // MS 1525 lower bound
 
-// --- ME LEAD CONSTANTS (Real Physics) ---
-// Heating rate when AC is OFF (°C per minute)
-#define HEATING_RATE_PER_MIN 0.00822 
-// Cooling rate when AC is ON (°C per minute)
-#define COOLING_RATE_PER_MIN 0.05178 
-
-// --- DEMO MODE (For Pitch Video) ---
-// Set to true to multiply thermal rates by 60x for the 3-minute video
-#define DEMO_MODE true 
-const float TIME_LAPSE_MULTIPLIER = 60.0; 
-
-// --- WATCHDOG & FAILSAFE VARIABLES ---
-unsigned long lastPacketTime = 0;       
-const unsigned long WATCHDOG_TIMEOUT = 3000; // 3 seconds
-bool failsafeActive = false;            
+// --- WATCHDOG & FAILSAFE ---
+unsigned long lastPacketTime = 0;
+const unsigned long WATCHDOG_TIMEOUT = 1500; // Increased to 1.5s for Dashboard compatibility
+bool failsafeActive = false;
 
 // --- STATE VARIABLES ---
-float current_temp = 24.5; // Starting room temp
-bool relay_state = true;   // true = ON (Cooling), false = OFF (Shedding)
-float thermal_slack = 0.0; // Minutes until room hits 26.0°C
+float roomTemp = 25.0;
+bool relayState = true; // true = ON (Cooling)
+int userPreference = 1; // 0=Eco, 1=Balanced, 2=Comfort
+float minSafeSlack = 15.0; // Default threshold in minutes
+bool useExternalTemp = false;
 
-// --- USER PREFERENCE LOGIC ---
-int user_preference = 2; // 1: Max Savings, 2: Balanced, 3: Max Comfort
-float min_safe_slack = 15.0; // Default for Balanced
-
-// --- TIMING VARIABLES ---
+// --- TIMING ---
 unsigned long lastLogicCheck = 0;
-unsigned long lastMockSend = 0;
-const long logic_interval = 1000;  // 1 second
-const long mock_interval = 2000;   // Simulate dashboard packet every 2 seconds
+const unsigned long LOGIC_INTERVAL = 1000; // 1 second loop
 
-// --- MOCK JSON PAYLOADS (Simulating CS Lead's Streamlit App) ---
-// Change "pref" to 1, 2, or 3 to test different user modes
-const char* json_payload_balanced = "{\"s\": 0.2, \"ta\": 31.0, \"pref\": 2}\n";
+// --- SERIAL BUFFER ---
+String serialBuffer = "";
 
 void setup() {
+  while (!Serial && millis() < 5000);
+  delay(500);
   Serial.begin(115200);
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH); // Default to ON (Comfort) on boot
   
+  if(psramInit()) {
+    Serial.println("[PSRAM] 8MB Octal PSRAM initialized");
+  } else {
+    Serial.println("[PSRAM] WARNING: PSRAM init failed");
+  }
+  
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // Safe boot state
   lastPacketTime = millis(); 
   
   Serial.println("=========================================");
@@ -56,97 +54,119 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // ==========================================
-  // 1. WATCHDOG CHECK
-  // ==========================================
+  // 1. NON-BLOCKING SERIAL PARSING
+  while (Serial.available()) {
+    char c = Serial.read();
+    
+    // Ignore null bytes often sent by USB-CDC drivers
+    if (c == 0) continue; 
+
+    if (c == '\n') {
+      if (serialBuffer.length() > 0) { 
+        StaticJsonDocument<512> doc;
+        DeserializationError error = deserializeJson(doc, serialBuffer);
+        
+        if (!error) {
+          lastPacketTime = currentMillis; 
+          
+          if (failsafeActive) {
+            failsafeActive = false;
+            Serial.println("[WATCHDOG] Comms Restored. Returning to Edge Control.");
+          }
+          
+          if (doc.containsKey("ta")) {
+            float ta = doc["ta"].as<float>();
+            if (ta > -40.0 && ta < 85.0) {
+              roomTemp = ta;
+              useExternalTemp = true;
+            }
+          }
+          if (doc.containsKey("pref")) {
+            int pref = doc["pref"].as<int>();
+            if (pref >= 0 && pref <= 2) {
+              userPreference = pref;
+              switch(pref) {
+                case 0: minSafeSlack = 30.0; break;
+                case 1: minSafeSlack = 15.0; break;
+                case 2: minSafeSlack = 0.0; break;
+              }
+            }
+          }
+          Serial.printf("[RX] Ta=%.1fC, Pref=%d (Slack Threshold: %.1f)\n", 
+                        roomTemp, userPreference, minSafeSlack);
+        } else {
+          Serial.printf("[PARSE ERROR] %s\n", error.c_str());
+        }
+      }
+      serialBuffer = ""; 
+    } else {
+      serialBuffer += c;
+    }
+  }
+
+  // 2. WATCHDOG CHECK
   if (currentMillis - lastPacketTime >= WATCHDOG_TIMEOUT && !failsafeActive) {
     failsafeActive = true;
-    relay_state = true; // Force Relay ON
+    relayState = true;
     digitalWrite(RELAY_PIN, HIGH);
     Serial.println("[WATCHDOG] CRITICAL: Comms Lost! Defaulting to SAFE STATE (Relay ON).");
   }
 
-  // ==========================================
-  // 2. SIMULATE INCOMING JSON FROM DASHBOARD
-  // ==========================================
-  const char* incoming_data = json_payload_balanced; 
-
-  if (incoming_data != NULL && currentMillis - lastMockSend >= mock_interval) {
-    lastMockSend = currentMillis;
-    lastPacketTime = currentMillis; // Reset watchdog
-    
-    if (failsafeActive) {
-      failsafeActive = false;
-      Serial.println("[WATCHDOG] Comms Restored. Returning to Edge Control.");
-    }
-
-    // --- JSON PARSING LOGIC ---
-    StaticJsonDocument<256> doc;
-    DeserializationError error = deserializeJson(doc, incoming_data);
-
-    if (error) {
-      Serial.print("[JSON ERROR] Failed to parse: ");
-      Serial.println(error.c_str());
-    } else {
-      float solar_kw = doc["s"];
-      float ambient_temp = doc["ta"];
-      
-      // Update User Preference if present
-      if (doc.containsKey("pref")) {
-        user_preference = doc["pref"];
-        if (user_preference == 1) min_safe_slack = 30.0;      // Max Savings
-        else if (user_preference == 2) min_safe_slack = 15.0; // Balanced
-        else if (user_preference == 3) min_safe_slack = 0.0;  // Max Comfort (Never shed)
-      }
-      
-      Serial.printf("[RX] Solar=%.1fkW, Ambient=%.1fC, Pref=%d (Slack Threshold: %.1f)\n", 
-                    solar_kw, ambient_temp, user_preference, min_safe_slack);
-    }
-  }
-
-  // ==========================================
-  // 3. THERMAL PHYSICS & EDGE DECISION
-  // ==========================================
-  if (currentMillis - lastLogicCheck >= logic_interval) {
+  // 3. THERMAL LOGIC (1Hz)
+  if (currentMillis - lastLogicCheck >= LOGIC_INTERVAL) {
     lastLogicCheck = currentMillis;
-
-    // A. Apply physical rates (scaled by multiplier if in DEMO_MODE)
-    float current_heating = HEATING_RATE_PER_MIN;
-    float current_cooling = COOLING_RATE_PER_MIN;
     
-    if (DEMO_MODE) {
-      current_heating *= TIME_LAPSE_MULTIPLIER;
-      current_cooling *= TIME_LAPSE_MULTIPLIER;
+    if (!useExternalTemp) {
+        float delta = relayState ? -COOLING_RATE : HEATING_RATE;
+        roomTemp += delta / 60.0; 
     }
-
-    if (relay_state) {
-      current_temp -= (current_cooling / 60.0); // Convert min rate to sec rate
+    useExternalTemp = false; 
+    
+    // --- SLACK CALCULATION ---
+    float thermalSlack = 0.0;
+    if (roomTemp < TEMP_UPPER_LIMIT) {
+      thermalSlack = (TEMP_UPPER_LIMIT - roomTemp) / HEATING_RATE;
     } else {
-      current_temp += (current_heating / 60.0);
+      thermalSlack = 0.0; 
     }
-
-    // B. Calculate Thermal Slack
-    if (current_temp >= TEMP_MAX_COMFORT) {
-      thermal_slack = 0.0;
-    } else {
-      // Use real heating rate for slack calculation (scaled for demo)
-      thermal_slack = (TEMP_MAX_COMFORT - current_temp) / current_heating;
-    }
-
-    // C. EDGE DECISION MAKING
-    if (thermal_slack > min_safe_slack && relay_state == true) {
-      relay_state = false; // Safe to shed
-      Serial.printf("[DECISION] Shedding Load. Slack: %.1f > Threshold: %.1f\n", thermal_slack, min_safe_slack);
+    
+    bool shouldShed = (thermalSlack > minSafeSlack) && (userPreference != 2);
+    
+    if (shouldShed && relayState) {
+      relayState = false;
+      Serial.printf("[ACTUATION] RELAY OFF - Shedding Load (Slack: %.1fmin > %.1fmin)\n", 
+                    thermalSlack, minSafeSlack);
     } 
-    else if (thermal_slack <= min_safe_slack && relay_state == false) {
-      relay_state = true; // Must restore comfort
-      Serial.printf("[DECISION] Restoring Load. Slack: %.1f <= Threshold: %.1f\n", thermal_slack, min_safe_slack);
+    else if (!shouldShed && !relayState) {
+      relayState = true;
+      Serial.printf("[ACTUATION] RELAY ON - Restoring Load (Slack: %.1fmin <= %.1fmin)\n", 
+                    thermalSlack, minSafeSlack);
     }
-
-    // D. Apply state and broadcast TX
-    digitalWrite(RELAY_PIN, relay_state ? HIGH : LOW);
     
-    Serial.printf("[TX] {\"r\": %d, \"t\": %.1f, \"sl\": %.1f}\n", 
-                  relay_state ? 1 : 0, current_temp, thermal_slack);
+    digitalWrite(RELAY_PIN, relayState);
+
+    // --- API CONTRACT V1.0 TX PAYLOAD ---
+    String statusStr = "IDLE";
+    if (failsafeActive) statusStr = "FAULT";
+    else if (relayState) statusStr = "COOLING";
+    else statusStr = "HEATING";
+
+    float target = (userPreference == 2) ? TEMP_LOWER_LIMIT : TEMP_UPPER_LIMIT;
+
+    // 1. Send ONLY the JSON on this line for easy parsing
+    Serial.printf("[TX] {\"status\":\"%s\",\"relay_state\":%s,\"temp_target\":%.1f,\"slack\":%.1f,\"uptime_ms\":%lu}\n", 
+                  statusStr.c_str(), 
+                  relayState ? "true" : "false", 
+                  target, 
+                  thermalSlack, 
+                  currentMillis);
+    
+    delay(5); // Yield to USB stack to ensure buffer flushes before next print
+
+    // 2. Send debug info on a SEPARATE line
+    Serial.printf("[DEBUG] TimeDelta: %lu ms | Failsafe: %s\n", 
+                  currentMillis - lastPacketTime, failsafeActive ? "ACTIVE" : "OK");
   }
+  
+  delay(1); // Yield to USB stack
 }
