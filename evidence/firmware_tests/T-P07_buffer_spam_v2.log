@@ -1,0 +1,68 @@
+[TEST] Sending 50 packets...
+[TX] {"r":0,"t":25.0,"sl":121.6}
+[DEBUG] TimeDelta: 14011 ms | Failsafe: ACTIVE
+[WATCHDOG] Comms Restored. Returning to Edge Control.
+[RX] Ta=25.0C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.1C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.2C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.3C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.4C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.5C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.6C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.7C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.8C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=25.9C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.0C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.1C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.2C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.3C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.4C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.5C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.6C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.7C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.8C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=26.9C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.0C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.1C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.2C, Pref=1 (Slack Threshold: 15.0)
+[ACTUATION] RELAY ON - Restoring Load (Slack: 0.0min <= 15.0min)
+[TX] {"r":1,"t":27.2,"sl":0.0}
+[DEBUG] TimeDelta: 9 ms | Failsafe: OK
+[RX] Ta=27.3C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.4C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.5C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.6C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.7C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.8C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=27.9C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.0C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.1C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.2C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.3C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.4C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.5C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.6C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.7C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.8C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=28.9C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.0C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.1C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.2C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.3C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.4C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.5C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.6C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.7C, Pref=1 (Slack Threshold: 15.0)
+[TX] {"r":1,"t":29.7,"sl":0.0}
+[DEBUG] TimeDelta: 2 ms | Failsafe: OK
+[RX] Ta=29.8C, Pref=1 (Slack Threshold: 15.0)
+[RX] Ta=29.9C, Pref=1 (Slack Threshold: 15.0)
+[WATCHDOG] CRITICAL: Comms Lost! Defaulting to SAFE STATE (Relay ON).
+[TX] {"r":1,"t":29.9,"sl":0.0}
+[DEBUG] TimeDelta: 921 ms | Failsafe: ACTIVE
+[TX] {"r":1,"t":29.9,"sl":0.0}
+[DEBUG] TimeDelta: 1921 ms | Failsafe: ACTIVE
+[TX] {"r":1,"t":29.9,"sl":0.0}
+[DEBUG] TimeDelta: 2921 ms | Failsafe: ACTIVE
+
+[PASS] Stable
