@@ -2,6 +2,11 @@
 #define ARDUINO_USB_MODE 1
 
 #include <ArduinoJson.h>
+#include <DHT.h> // Ensure you have the DHT library installed via arduino-cli lib install DHT sensor library
+
+#define DHTPIN 10
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
 
 // --- PIN DEFINITIONS ---
 #define RELAY_PIN 4  // N16R8 safe pin with 10k pulldown to GND
@@ -12,21 +17,25 @@ const float HEATING_RATE = 0.00822;   // °C/min when AC OFF
 const float TEMP_UPPER_LIMIT = 26.0;  // MS 1525 upper bound
 const float TEMP_LOWER_LIMIT = 23.0;  // MS 1525 lower bound
 
+// --- CALIBRATION ---
+// Calculate: Offset = Reference_Temp - Raw_ESP32_Temp
+const float TEMP_CALIBRATION_OFFSET = 2.8; // REPLACE WITH YOUR CALCULATED VALUE
+
 // --- WATCHDOG & FAILSAFE ---
 unsigned long lastPacketTime = 0;
-const unsigned long WATCHDOG_TIMEOUT = 1500; // Increased to 1.5s for Dashboard compatibility
+const unsigned long WATCHDOG_TIMEOUT = 1500; 
 bool failsafeActive = false;
 
 // --- STATE VARIABLES ---
 float roomTemp = 25.0;
-bool relayState = true; // true = ON (Cooling)
-int userPreference = 1; // 0=Eco, 1=Balanced, 2=Comfort
-float minSafeSlack = 15.0; // Default threshold in minutes
+bool relayState = true; 
+int userPreference = 1; 
+float minSafeSlack = 15.0; 
 bool useExternalTemp = false;
 
 // --- TIMING ---
 unsigned long lastLogicCheck = 0;
-const unsigned long LOGIC_INTERVAL = 1000; // 1 second loop
+const unsigned long LOGIC_INTERVAL = 1000; 
 
 // --- SERIAL BUFFER ---
 String serialBuffer = "";
@@ -46,6 +55,8 @@ void setup() {
   digitalWrite(RELAY_PIN, HIGH); // Safe boot state
   lastPacketTime = millis(); 
   
+  dht.begin(); // Initialize DHT sensor
+  
   Serial.println("=========================================");
   Serial.println("[BOOT] EdgeGrid HIL Controller Initialized.");
   Serial.println("=========================================");
@@ -57,8 +68,6 @@ void loop() {
   // 1. NON-BLOCKING SERIAL PARSING
   while (Serial.available()) {
     char c = Serial.read();
-    
-    // Ignore null bytes often sent by USB-CDC drivers
     if (c == 0) continue; 
 
     if (c == '\n') {
@@ -116,9 +125,16 @@ void loop() {
   if (currentMillis - lastLogicCheck >= LOGIC_INTERVAL) {
     lastLogicCheck = currentMillis;
     
+    // Read from DHT22 if no external temp provided recently
     if (!useExternalTemp) {
-        float delta = relayState ? -COOLING_RATE : HEATING_RATE;
-        roomTemp += delta / 60.0; 
+        float raw_temp = dht.readTemperature();
+        if (!isnan(raw_temp)) {
+            roomTemp = raw_temp + TEMP_CALIBRATION_OFFSET;
+            // Debug print for calibration evidence
+            Serial.printf("[DEBUG] Raw Temp: %.1f | Calibrated: %.1f\n", raw_temp, roomTemp);
+        } else {
+            Serial.println("[DEBUG] Failed to read from DHT sensor!");
+        }
     }
     useExternalTemp = false; 
     
@@ -161,7 +177,7 @@ void loop() {
                   thermalSlack, 
                   currentMillis);
     
-    delay(5); // Yield to USB stack to ensure buffer flushes before next print
+    delay(5); // Yield to USB stack
 
     // 2. Send debug info on a SEPARATE line
     Serial.printf("[DEBUG] TimeDelta: %lu ms | Failsafe: %s\n", 
