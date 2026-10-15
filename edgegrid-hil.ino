@@ -2,24 +2,24 @@
 #define ARDUINO_USB_MODE 1
 
 #include <ArduinoJson.h>
-#include <DHT.h> // Ensure you have the DHT library installed via arduino-cli lib install DHT sensor library
+#include <DHT.h>
+#include <esp_heap_caps.h> // For heap monitoring
 
 #define DHTPIN 10
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
 // --- PIN DEFINITIONS ---
-#define RELAY_PIN 4  // N16R8 safe pin with 10k pulldown to GND
+#define RELAY_PIN 4
 
 // --- THERMAL MODEL CONSTANTS (ME Verified) ---
-const float COOLING_RATE = 0.05178;   // °C/min when AC ON
-const float HEATING_RATE = 0.00822;   // °C/min when AC OFF
-const float TEMP_UPPER_LIMIT = 26.0;  // MS 1525 upper bound
-const float TEMP_LOWER_LIMIT = 23.0;  // MS 1525 lower bound
+const float COOLING_RATE = 0.05178;
+const float HEATING_RATE = 0.00822;
+const float TEMP_UPPER_LIMIT = 26.0;
+const float TEMP_LOWER_LIMIT = 23.0;
 
 // --- CALIBRATION ---
-// Calculate: Offset = Reference_Temp - Raw_ESP32_Temp
-const float TEMP_CALIBRATION_OFFSET = 2.8; // REPLACE WITH YOUR CALCULATED VALUE
+const float TEMP_CALIBRATION_OFFSET = 2.8; 
 
 // --- WATCHDOG & FAILSAFE ---
 unsigned long lastPacketTime = 0;
@@ -35,10 +35,13 @@ bool useExternalTemp = false;
 
 // --- TIMING ---
 unsigned long lastLogicCheck = 0;
+unsigned long lastHeapCheck = 0; // For periodic heap stats
 const unsigned long LOGIC_INTERVAL = 1000; 
+const unsigned long HEAP_CHECK_INTERVAL = 10000; // Print heap every 10s
 
 // --- SERIAL BUFFER ---
 String serialBuffer = "";
+const int MAX_BUFFER_SIZE = 1024; // Safety limit to prevent memory bloat
 
 void setup() {
   while (!Serial && millis() < 5000);
@@ -52,10 +55,10 @@ void setup() {
   }
   
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH); // Safe boot state
+  digitalWrite(RELAY_PIN, HIGH); 
   lastPacketTime = millis(); 
   
-  dht.begin(); // Initialize DHT sensor
+  dht.begin(); 
   
   Serial.println("=========================================");
   Serial.println("[BOOT] EdgeGrid HIL Controller Initialized.");
@@ -83,33 +86,47 @@ void loop() {
             Serial.println("[WATCHDOG] Comms Restored. Returning to Edge Control.");
           }
           
+          // ROBUST EDGE CASE HANDLING FOR 'ta'
           if (doc.containsKey("ta")) {
-            float ta = doc["ta"].as<float>();
-            if (ta > -40.0 && ta < 85.0) {
-              roomTemp = ta;
-              useExternalTemp = true;
+            if (!doc["ta"].isNull() && doc["ta"].is<float>()) {
+              float ta = doc["ta"].as<float>();
+              if (ta > -40.0 && ta < 85.0) {
+                roomTemp = ta;
+                useExternalTemp = true;
+              }
             }
           }
+
+          // ROBUST EDGE CASE HANDLING FOR 'pref'
           if (doc.containsKey("pref")) {
-            int pref = doc["pref"].as<int>();
-            if (pref >= 0 && pref <= 2) {
-              userPreference = pref;
-              switch(pref) {
-                case 0: minSafeSlack = 30.0; break;
-                case 1: minSafeSlack = 15.0; break;
-                case 2: minSafeSlack = 0.0; break;
+             if (!doc["pref"].isNull() && doc["pref"].is<int>()) {
+              int pref = doc["pref"].as<int>();
+              if (pref >= 0 && pref <= 2) {
+                userPreference = pref;
+                switch(pref) {
+                  case 0: minSafeSlack = 30.0; break;
+                  case 1: minSafeSlack = 15.0; break;
+                  case 2: minSafeSlack = 0.0; break;
+                }
               }
             }
           }
           Serial.printf("[RX] Ta=%.1fC, Pref=%d (Slack Threshold: %.1f)\n", 
                         roomTemp, userPreference, minSafeSlack);
         } else {
-          Serial.printf("[PARSE ERROR] %s\n", error.c_str());
+          // Silently ignore parse errors to keep logs clean during spam tests
+          // Serial.printf("[PARSE ERROR] %s\n", error.c_str());
         }
       }
       serialBuffer = ""; 
     } else {
-      serialBuffer += c;
+      // Buffer safety: only append if we haven't hit the limit
+      if (serialBuffer.length() < MAX_BUFFER_SIZE) {
+        serialBuffer += c;
+      } else {
+        // If buffer is full, discard the rest of this "line" until newline
+        continue; 
+      }
     }
   }
 
@@ -125,15 +142,12 @@ void loop() {
   if (currentMillis - lastLogicCheck >= LOGIC_INTERVAL) {
     lastLogicCheck = currentMillis;
     
-    // Read from DHT22 if no external temp provided recently
     if (!useExternalTemp) {
         float raw_temp = dht.readTemperature();
         if (!isnan(raw_temp)) {
             roomTemp = raw_temp + TEMP_CALIBRATION_OFFSET;
-            // Debug print for calibration evidence
-            Serial.printf("[DEBUG] Raw Temp: %.1f | Calibrated: %.1f\n", raw_temp, roomTemp);
         } else {
-            Serial.println("[DEBUG] Failed to read from DHT sensor!");
+            // Serial.println("[DEBUG] Failed to read from DHT sensor!");
         }
     }
     useExternalTemp = false; 
@@ -150,13 +164,11 @@ void loop() {
     
     if (shouldShed && relayState) {
       relayState = false;
-      Serial.printf("[ACTUATION] RELAY OFF - Shedding Load (Slack: %.1fmin > %.1fmin)\n", 
-                    thermalSlack, minSafeSlack);
+      // Serial.printf("[ACTUATION] RELAY OFF - Shedding Load (Slack: %.1fmin > %.1fmin)\n", thermalSlack, minSafeSlack);
     } 
     else if (!shouldShed && !relayState) {
       relayState = true;
-      Serial.printf("[ACTUATION] RELAY ON - Restoring Load (Slack: %.1fmin <= %.1fmin)\n", 
-                    thermalSlack, minSafeSlack);
+      // Serial.printf("[ACTUATION] RELAY ON - Restoring Load (Slack: %.1fmin <= %.1fmin)\n", thermalSlack, minSafeSlack);
     }
     
     digitalWrite(RELAY_PIN, relayState);
@@ -169,7 +181,6 @@ void loop() {
 
     float target = (userPreference == 2) ? TEMP_LOWER_LIMIT : TEMP_UPPER_LIMIT;
 
-    // 1. Send ONLY the JSON on this line for easy parsing
     Serial.printf("[TX] {\"status\":\"%s\",\"relay_state\":%s,\"temp_target\":%.1f,\"slack\":%.1f,\"uptime_ms\":%lu}\n", 
                   statusStr.c_str(), 
                   relayState ? "true" : "false", 
@@ -177,12 +188,16 @@ void loop() {
                   thermalSlack, 
                   currentMillis);
     
-    delay(5); // Yield to USB stack
-
-    // 2. Send debug info on a SEPARATE line
-    Serial.printf("[DEBUG] TimeDelta: %lu ms | Failsafe: %s\n", 
-                  currentMillis - lastPacketTime, failsafeActive ? "ACTIVE" : "OK");
+    delay(5); 
   }
   
-  delay(1); // Yield to USB stack
+  // 4. PERIODIC HEAP MONITORING (Every 10 seconds)
+  if (currentMillis - lastHeapCheck >= HEAP_CHECK_INTERVAL) {
+    lastHeapCheck = currentMillis;
+    Serial.printf("[HEAP] Free: %u | MinFree: %u\n", 
+                  esp_get_free_heap_size(), 
+                  esp_get_minimum_free_heap_size());
+  }
+
+  delay(1); 
 }
